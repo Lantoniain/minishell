@@ -3,28 +3,22 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <string.h>
-#include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
 
 #define MAX_ARGS 64
+#define MAX_CMDS 16
 
+// ---------------- Redirections ----------------
 int redirect_output(char **argv) {
     for (int i = 0; argv[i]; i++) {
         if (strcmp(argv[i], ">") == 0) {
-            if (!argv[i + 1]) {
-                fprintf(stderr, "No file for redirection\n");
-                return -1;
-            }
+            if (!argv[i + 1]) { fprintf(stderr, "No file for redirection\n"); return -1; }
             int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0) {
-                perror("open");
-                return -1;
-            }
-            dup2(fd, STDOUT_FILENO); // redirige stdout vers le fichier
+            if (fd < 0) { perror("open"); return -1; }
+            dup2(fd, STDOUT_FILENO);
             close(fd);
-
-            argv[i] = NULL; // couper argv avant ">"
+            argv[i] = NULL;
             break;
         }
     }
@@ -34,18 +28,11 @@ int redirect_output(char **argv) {
 int redirect_input(char **argv) {
     for (int i = 0; argv[i]; i++) {
         if (strcmp(argv[i], "<") == 0) {
-            if (!argv[i + 1]) {
-                fprintf(stderr, "No file for input redirection\n");
-                return -1;
-            }
+            if (!argv[i + 1]) { fprintf(stderr, "No file for input redirection\n"); return -1; }
             int fd = open(argv[i + 1], O_RDONLY);
-            if (fd < 0) {
-                perror("open");
-                return -1;
-            }
-            dup2(fd, STDIN_FILENO); // redirige stdin depuis le fichier
+            if (fd < 0) { perror("open"); return -1; }
+            dup2(fd, STDIN_FILENO);
             close(fd);
-
             argv[i] = NULL;
             break;
         }
@@ -53,95 +40,105 @@ int redirect_input(char **argv) {
     return 0;
 }
 
-
+// ---------------- Signal handler ----------------
 void sigint_handler(int sig) {
-    (void)sig; // on n’utilise pas le numéro du signal
+    (void)sig;
     const char *prompt = "\nminishell$ ";
-    write(STDOUT_FILENO, prompt, 12); // affiche le prompt immédiatement
+    write(STDOUT_FILENO, prompt, 12);
 }
 
-int main(){
-    char *line = NULL; //buffer pour getline
-    size_t len = 0; //taille du buffer
+// ---------------- Découpe des arguments avec guillemets ----------------
+void parse_args_quotes(char *line, char **argv) {
+    int i = 0;
+    char *p = line;
+    while (*p) {
+        // sauter les espaces initiaux
+        while (*p == ' ') p++;
+        if (*p == '\0') break;
+
+        char *start;
+        //int in_quotes = 0;
+
+        if (*p == '"') { // argument entre guillemets
+            //in_quotes = 1;
+            start = ++p; // ignorer le guillemet ouvrant
+            while (*p && *p != '"') p++;
+        } else {
+            start = p;
+            while (*p && *p != ' ') p++;
+        }
+
+        // mettre fin à l’argument
+        if (*p) { *p = '\0'; p++; }
+
+        argv[i++] = start;
+    }
+    argv[i] = NULL;
+}
+
+// ---------------- Main ----------------
+int main() {
+    char *line = NULL;
+    size_t len = 0;
 
     signal(SIGINT, sigint_handler);
 
-    while(1){ //boucle infinie
-        //afficher le prompt
+    while(1) {
         printf("minishell$ ");
-        fflush(stdout); //s'assurer que le prompt s'affiche immédiatement
+        fflush(stdout);
 
-        //lire la ligne
         ssize_t nread = getline(&line, &len, stdin);
+        if (nread == -1) { printf("\nExit\n"); break; }
+        if (line[nread - 1] == '\n') line[nread - 1] = '\0';
+        if (line[0] == '\0') continue;
 
-        //gérer fin de fichier (Ctrl+D)
-        if (nread == -1){
-            printf("\nExit\n");
-            break;
-        }
-
-        //retirer le '\n' final
-        if (line[nread - 1] == '\n'){
-            line[nread - 1] = '\0';
-        }
-
-        //ignorer la ligne vide
-        if (line[0] == '\0'){
+        // ---------------- Builtins ----------------
+        if (strncmp(line, "exit", 4) == 0) break;
+        if (strncmp(line, "cd", 2) == 0) {
+            char *dir = strtok(line + 3, " "); // après "cd "
+            if (!dir) fprintf(stderr, "cd: missing argument\n");
+            else if (chdir(dir) != 0) perror("cd");
             continue;
         }
 
-        //découper la lgine en arguments
-        char *argv[MAX_ARGS];
-        int i = 0;
-        char *token = strtok(line, " ");
-        while (token && i < MAX_ARGS - 1){
-            argv[i++] = token;
-            token = strtok(NULL, " ");
-        }
-        argv[i] = NULL;
+        // ---------------- Pipes multiples ----------------
+        char *cmds[MAX_CMDS];
+        int n_cmds = 0;
+        cmds[n_cmds] = strtok(line, "|");
+        while ((cmds[++n_cmds] = strtok(NULL, "|")) != NULL);
 
-        //builtins
-        if (argv[0] == NULL){
-            continue;
-        }
+        int pipefd[2*(n_cmds-1)]; // N-1 pipes
+        for (int i = 0; i < n_cmds-1; i++) pipe(pipefd + i*2);
 
-        //builtin exit
-        if (strcmp(argv[0], "exit") == 0){
-            break; 
-        }
+        for (int i = 0; i < n_cmds; i++) {
+            char *argv[MAX_ARGS];
+            parse_args_quotes(cmds[i], argv);
+            if (!argv[0]) continue;
 
-        //builtin : cd
-        if (strcmp(argv[0], "cd") == 0){
-            if (argv[1] == NULL){
-                fprintf(stderr, "cd: missing argument\n");
-            }else if (chdir(argv[1]) != 0){
-                perror("cd");
+            pid_t pid = fork();
+            if (pid == 0) {
+                // stdin ← pipe précédent si ce n’est pas la première commande
+                if (i > 0) dup2(pipefd[(i-1)*2], STDIN_FILENO);
+                // stdout → pipe suivant si ce n’est pas la dernière commande
+                if (i < n_cmds-1) dup2(pipefd[i*2 + 1], STDOUT_FILENO);
+
+                // fermer tous les pipes inutiles
+                for (int j = 0; j < 2*(n_cmds-1); j++) close(pipefd[j]);
+
+                // redirections
+                if (redirect_input(argv) == -1 || redirect_output(argv) == -1) exit(1);
+
+                execvp(argv[0], argv);
+                perror("execvp");
+                exit(1);
             }
-            continue; //ne fork pas pour cd
         }
 
-        pid_t pid = fork();
-
-        if (pid == -1) {
-            perror("fork");
-            continue;
-        }
-
-        if (pid == 0) {
-            // processus enfant
-            if (redirect_output(argv) == -1 || redirect_input(argv) == -1) {
-                exit(1); // problème de fichier pour la redirection
-            }
-            execvp(argv[0], argv);
-            perror("execvp"); // si exec échoue
-            exit(1);
-        }
-        else {
-            // processus parent
-            wait(NULL);
-        }
+        // fermer tous les pipes dans le parent
+        for (int i = 0; i < 2*(n_cmds-1); i++) close(pipefd[i]);
+        for (int i = 0; i < n_cmds; i++) wait(NULL);
     }
 
-    free(line); //libérer la mémoire
+    free(line);
     return 0;
 }
