@@ -12,10 +12,45 @@
 // ---------------- Redirections ----------------
 int redirect_output(char **argv) {
     for (int i = 0; argv[i]; i++) {
+
+        // >  (truncate)
         if (strcmp(argv[i], ">") == 0) {
-            if (!argv[i + 1]) { fprintf(stderr, "No file for redirection\n"); return -1; }
-            int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0) { perror("open"); return -1; }
+            if (!argv[i + 1]) {
+                fprintf(stderr, "No file for redirection\n");
+                return -1;
+            }
+
+            int fd = open(argv[i + 1],
+                          O_WRONLY | O_CREAT | O_TRUNC,
+                          0644);
+
+            if (fd < 0) {
+                perror("open");
+                return -1;
+            }
+
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+            argv[i] = NULL;
+            break;
+        }
+
+        // >>  (append)
+        if (strcmp(argv[i], ">>") == 0) {
+            if (!argv[i + 1]) {
+                fprintf(stderr, "No file for redirection\n");
+                return -1;
+            }
+
+            int fd = open(argv[i + 1],
+                          O_WRONLY | O_CREAT | O_APPEND,
+                          0644);
+
+            if (fd < 0) {
+                perror("open");
+                return -1;
+            }
+
             dup2(fd, STDOUT_FILENO);
             close(fd);
             argv[i] = NULL;
@@ -93,7 +128,12 @@ int main() {
         if (line[0] == '\0') continue;
 
         // ---------------- Builtins ----------------
-        if (strncmp(line, "exit", 4) == 0) break;
+        // Builtin exit
+        if (strncmp(line, "exit", 4) == 0) { 
+            break;
+        }
+
+        // Builtin cd
         if (strncmp(line, "cd", 2) == 0) {
             char *dir = strtok(line + 3, " "); // après "cd "
             if (!dir) fprintf(stderr, "cd: missing argument\n");
@@ -108,26 +148,50 @@ int main() {
         while ((cmds[++n_cmds] = strtok(NULL, "|")) != NULL);
 
         int pipefd[2*(n_cmds-1)]; // N-1 pipes
-        for (int i = 0; i < n_cmds-1; i++) pipe(pipefd + i*2);
+
+        for (int i = 0; i < n_cmds-1; i++) {
+            pipe(pipefd + i*2);
+        }
 
         for (int i = 0; i < n_cmds; i++) {
             char *argv[MAX_ARGS];
             parse_args_quotes(cmds[i], argv);
-            if (!argv[0]) continue;
+
+            if (!argv[0]) {
+                continue;
+            }            
 
             pid_t pid = fork();
+
             if (pid == 0) {
-                // stdin ← pipe précédent si ce n’est pas la première commande
+                // stdin ← pipe précédent
                 if (i > 0) dup2(pipefd[(i-1)*2], STDIN_FILENO);
-                // stdout → pipe suivant si ce n’est pas la dernière commande
+
+                // stdout → pipe suivant
                 if (i < n_cmds-1) dup2(pipefd[i*2 + 1], STDOUT_FILENO);
 
-                // fermer tous les pipes inutiles
-                for (int j = 0; j < 2*(n_cmds-1); j++) close(pipefd[j]);
+                // fermer tous les pipes
+                for (int j = 0; j < 2*(n_cmds-1); j++)
+                    close(pipefd[j]);
 
                 // redirections
-                if (redirect_input(argv) == -1 || redirect_output(argv) == -1) exit(1);
+                if (redirect_input(argv) == -1 || redirect_output(argv) == -1)
+                    exit(1);
 
+                // -------- BUILTIN ECHO (ICI) --------
+                if (strcmp(argv[0], "echo") == 0) {
+                    int j = 1;
+                    while (argv[j]) {
+                        printf("%s", argv[j]);
+                        if (argv[j + 1])
+                            printf(" ");
+                        j++;
+                    }
+                    printf("\n");
+                    exit(0);
+                }
+
+                // commande normale
                 execvp(argv[0], argv);
                 perror("execvp");
                 exit(1);
